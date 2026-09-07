@@ -21,10 +21,11 @@ GitHub repo ──(CodeStar connection)──▶ CodePipeline
                                                 • build the interactive UI bundle
                                                   (index.html + app.js + styles.css
                                                    + report.json + ai-bom.json)
-                                                • upload to S3 reports bucket
+                                                • upload to private S3 reports bucket
+                                                • invalidate CloudFront cache
                                                         │
                                                         ▼
-                                          S3 static website  ──▶ Security team
+                              Private S3 bucket ◀──(OAC)── CloudFront (HTTPS) ──▶ Security team
 ```
 
 - **CodePipeline** orchestrates the run. The Source stage pulls the target repo through
@@ -34,8 +35,11 @@ GitHub repo ──(CodeStar connection)──▶ CodePipeline
   static bundle (`index.html`, `app.js`, `styles.css`, `report.json`, `ai-bom.json`) using
   the tool's own `prepare_ui_dir()`. It also writes SARIF and CycloneDX evidence alongside,
   then uploads everything to the reports S3 bucket.
-- **S3** hosts the interactive report as a static website with a stable `latest/` URL. The
-  UI is pure client-side (it fetches `./report.json`), so no server is needed on S3.
+- **S3** stores the interactive report in a **private** bucket (no public access, no website
+  endpoint). The UI is pure client-side (it fetches `./report.json`), so no server is needed.
+- **CloudFront** is the only way to reach the bucket, using **Origin Access Control (OAC)**.
+  It serves over HTTPS, resolves folder URLs to `index.html` via a CloudFront Function, and
+  is cache-invalidated on every publish so the newest report shows immediately.
 
 ### A note on CodeDeploy
 
@@ -125,9 +129,11 @@ aws cloudformation describe-stacks --stack-name apisec-ai-surface \
   --query "Stacks[0].Outputs" --output table
 ```
 
-- **`ReportWebsiteUrl`** — base website URL. Opening it with no path redirects straight to
-  the latest report (a root `index.html` redirect is published on every run).
-- **`LatestReportUrl`** — stable, bookmarkable URL for the most recent scan (`/latest/index.html`).
+- **`ReportWebsiteUrl`** — the CloudFront base URL. Opening it with no path redirects
+  straight to the latest report (a root `index.html` redirect is published on every run).
+- **`LatestReportUrl`** — stable, bookmarkable CloudFront URL for the most recent scan
+  (`/latest/index.html`).
+- **`DistributionId`** — CloudFront distribution ID (used for cache invalidation).
 - Every scan is also kept immutably under `reports/<owner>/<name>/<timestamp>/index.html`.
 
 The report is the interactive attack-surface map (nodes grouped by category, risk badges,
@@ -160,10 +166,14 @@ for many repos — ask and it can be added.)
 
 ## Security notes
 
-- The reports bucket is configured for **static website hosting with public read** so the
-  security team can open the URL directly. If reports must stay internal, remove
-  `ReportBucketPolicy` from `template.yaml` and front the bucket with **CloudFront + Origin
-  Access Control**, or restrict the bucket policy by `aws:SourceVpce` / source IP.
+- The reports bucket is **private** with all public access blocked. It is reachable **only
+  through the CloudFront distribution** via Origin Access Control (OAC); the bucket policy
+  allows `s3:GetObject` only for this distribution (scoped by `AWS:SourceArn`). The old
+  `s3-website` endpoint no longer exists — use the CloudFront URL from the stack outputs.
+- CloudFront serves over HTTPS (`redirect-to-https`). To restrict *who* can reach CloudFront
+  (e.g. office IPs or SSO), attach AWS WAF to the distribution or put it behind Cognito /
+  signed URLs — the OAC only locks down S3-to-CloudFront, not viewer access.
+- Each publish runs a CloudFront invalidation so the newest report is served immediately.
 - The scanner runs offline: it executes no code from the target repo, makes no network calls,
   and needs no credentials for the target app.
 - Buckets use `DeletionPolicy: Retain`; deleting the stack leaves the buckets (and reports) in place.

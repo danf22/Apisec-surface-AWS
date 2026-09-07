@@ -101,6 +101,9 @@ Resources:
             Status: Enabled
             ExpirationInDays: 30
 
+  # Private bucket. It is NOT a public website and has no bucket-website config;
+  # it is reachable only through the CloudFront distribution below via Origin
+  # Access Control (OAC). All public access is blocked.
   ReportBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Retain
@@ -112,12 +115,9 @@ Resources:
           - ObjectOwnership: BucketOwnerEnforced
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
-        BlockPublicPolicy: false
+        BlockPublicPolicy: true
         IgnorePublicAcls: true
-        RestrictPublicBuckets: false
-      WebsiteConfiguration:
-        IndexDocument: index.html
-        ErrorDocument: index.html
+        RestrictPublicBuckets: true
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -129,9 +129,9 @@ Resources:
             Prefix: reports/
             ExpirationInDays: !Ref ReportRetentionDays
 
-  # Static-website read access. NOTE: this makes reports readable by anyone with
-  # the URL. For internal-only access, remove this policy and front the bucket
-  # with CloudFront + OAC or restrict by aws:SourceVpce / IP (see README).
+  # Bucket policy: allow read ONLY from this CloudFront distribution (OAC).
+  # The SourceArn condition scopes access to exactly this distribution, so no
+  # other principal (or other distribution) can read the objects.
   ReportBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -139,11 +139,82 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Sid: PublicReadForWebsite
+          - Sid: AllowCloudFrontOACRead
             Effect: Allow
-            Principal: "*"
+            Principal:
+              Service: cloudfront.amazonaws.com
             Action: s3:GetObject
             Resource: !Sub "${ReportBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ReportDistribution}"
+
+  # ---------------------------------------------------------------------------
+  # CloudFront: the only way to reach the reports bucket
+  # ---------------------------------------------------------------------------
+  ReportOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${ProjectName}-reports-oac"
+        Description: OAC for the AI Surface reports bucket.
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # Rewrites requests ending in "/" (or with no file extension) to ".../index.html"
+  # so folder URLs like /latest/owner/repo/ resolve to the report page. The S3
+  # REST origin (required by OAC) does not do index-document resolution itself.
+  ReportIndexFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "${ProjectName}-index-rewrite"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Append index.html to directory-style requests.
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri;
+          if (uri.endsWith('/')) {
+            request.uri = uri + 'index.html';
+          } else if (!uri.split('/').pop().includes('.')) {
+            request.uri = uri + '/index.html';
+          }
+          return request;
+        }
+
+  ReportDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${ProjectName} AI Surface reports"
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: ReportS3Origin
+            DomainName: !GetAtt ReportBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt ReportOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: ReportS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          # AWS managed "CachingOptimized" policy id.
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt ReportIndexFunction.FunctionMetadata.FunctionARN
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 404
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 404
+            ResponsePagePath: /index.html
 
   # ---------------------------------------------------------------------------
   # IAM roles
@@ -191,6 +262,11 @@ Resources:
                 Resource:
                   - !GetAtt ReportBucket.Arn
                   - !Sub "${ReportBucket.Arn}/*"
+              - Sid: InvalidateCloudFront
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ReportDistribution}"
 
   CodePipelineRole:
     Type: AWS::IAM::Role
@@ -259,6 +335,8 @@ Resources:
             Value: !Ref RepoOwner
           - Name: FAIL_ON
             Value: !Ref FailOn
+          - Name: DISTRIBUTION_ID
+            Value: !Ref ReportDistribution
       TimeoutInMinutes: 30
       Source:
         Type: CODEPIPELINE
@@ -348,9 +426,9 @@ Resources:
                 # Also mirror to /latest/ so that path serves the newest report directly.
                 - aws s3 cp "$OUT_DIR/" "s3://${REPORT_BUCKET}/latest/" --recursive
 
-                # Root landing page: opening the bare S3 website URL (no path) looks
-                # for index.html at the bucket root. Write one that redirects to the
-                # latest report so the site auto-opens the map.
+                # Root landing page: opening the CloudFront root (no path) serves
+                # DefaultRootObject=index.html. Write one that redirects to the
+                # latest report so the distribution auto-opens the map.
                 - |
                   cat > /tmp/root-index.html <<HTML
                   <!doctype html><html><head><meta charset="utf-8">
@@ -364,11 +442,19 @@ Resources:
                   HTML
                 - aws s3 cp /tmp/root-index.html "s3://${REPORT_BUCKET}/index.html" --content-type "text/html"
 
+                # Invalidate CloudFront so the new report is served immediately
+                # instead of a cached copy of the previous run.
+                - |
+                  if [ -n "${DISTRIBUTION_ID}" ]; then
+                    echo "Invalidating CloudFront distribution ${DISTRIBUTION_ID}..."
+                    aws cloudfront create-invalidation --distribution-id "${DISTRIBUTION_ID}" --paths "/*" || true
+                  fi
+
                 # Optional severity gate, applied AFTER the report is published.
                 - |
                   if [ "${FAIL_ON}" != "never" ]; then
                     echo "Re-running scan with --fail-on ${FAIL_ON} for the build gate..."
-                    ai-surface scan . --fail-on "${FAIL_ON}"
+                    ai-surface scan "$SCAN_DIR" --fail-on "${FAIL_ON}"
                   else
                     echo "FAIL_ON=never; build always succeeds so the report is always available."
                   fi
@@ -424,15 +510,19 @@ Resources:
 
 Outputs:
   ReportWebsiteUrl:
-    Description: Base URL of the S3-hosted report site. Latest report is at /latest/index.html.
-    Value: !GetAtt ReportBucket.WebsiteURL
+    Description: CloudFront URL for the reports. Opening it redirects to the latest report.
+    Value: !Sub "https://${ReportDistribution.DomainName}/"
 
   LatestReportUrl:
-    Description: Stable URL the security team can bookmark for the most recent scan.
-    Value: !Sub "${ReportBucket.WebsiteURL}/latest/index.html"
+    Description: Stable CloudFront URL the security team can bookmark for the most recent scan.
+    Value: !Sub "https://${ReportDistribution.DomainName}/latest/index.html"
+
+  DistributionId:
+    Description: CloudFront distribution ID (used for cache invalidation).
+    Value: !Ref ReportDistribution
 
   ReportBucketName:
-    Description: Reports bucket name.
+    Description: Reports bucket name (private; reachable only via CloudFront).
     Value: !Ref ReportBucket
 
   PipelineName:
