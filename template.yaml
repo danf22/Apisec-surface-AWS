@@ -78,8 +78,39 @@ Parameters:
       Min 8 characters. Stored in the CloudFront Function code at deploy time;
       rotate by updating the stack with a new value.
 
+  EnableWaf:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      Attach an AWS WAF web ACL to the CloudFront distribution. Adds an IP
+      allowlist (if AllowedCidrs is set) and a rate-based rule. Default off.
+      NOTE: this stack must be deployed in us-east-1 when EnableWaf=true,
+      because CloudFront-scoped WAF resources are global (us-east-1 only).
+
+  AllowedCidrs:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >
+      Comma-separated IPv4 CIDRs allowed to reach the reports (e.g.
+      "203.0.113.0/24,198.51.100.10/32"). Only used when EnableWaf=true.
+      Leave empty to allow all source IPs (rate limiting still applies).
+
+  WafRateLimitPerFiveMin:
+    Type: Number
+    Default: 2000
+    MinValue: 100
+    Description: >
+      Max requests allowed from a single IP per 5-minute window before WAF
+      blocks it (rate-based rule). Only used when EnableWaf=true.
+
 Conditions:
   CreateConnection: !Equals [!Ref ExistingConnectionArn, ""]
+  WafEnabled: !Equals [!Ref EnableWaf, "true"]
+  # Apply the IP allowlist only when WAF is on AND at least one CIDR is provided.
+  HasAllowedCidrs: !And
+    - !Condition WafEnabled
+    - !Not [!Equals [!Join ["", !Ref AllowedCidrs], ""]]
 
 Resources:
 
@@ -237,11 +268,71 @@ Resources:
           return request;
         }
 
+  # ---------------------------------------------------------------------------
+  # Optional WAF (CloudFront scope = global; must be created in us-east-1)
+  # ---------------------------------------------------------------------------
+  ReportIPSet:
+    Type: AWS::WAFv2::IPSet
+    Condition: HasAllowedCidrs
+    Properties:
+      Name: !Sub "${ProjectName}-allowlist"
+      Description: Source IPs allowed to reach the AI Surface reports.
+      Scope: CLOUDFRONT
+      IPAddressVersion: IPV4
+      Addresses: !Ref AllowedCidrs
+
+  ReportWebACL:
+    Type: AWS::WAFv2::WebACL
+    Condition: WafEnabled
+    Properties:
+      Name: !Sub "${ProjectName}-web-acl"
+      Scope: CLOUDFRONT
+      # Default DENY when an allowlist is configured (only listed IPs pass);
+      # default ALLOW when no allowlist is set (rate limiting still applies).
+      DefaultAction: !If
+        - HasAllowedCidrs
+        - Block: {}
+        - Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "${ProjectName}-web-acl"
+      Rules:
+        # Rate limit every source IP (runs regardless of allowlist).
+        - Name: RateLimit
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: !Ref WafRateLimitPerFiveMin
+              AggregateKeyType: IP
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: !Sub "${ProjectName}-rate-limit"
+        # Allow listed IPs (only present when an allowlist is configured).
+        - !If
+          - HasAllowedCidrs
+          - Name: AllowListedIPs
+            Priority: 1
+            Action:
+              Allow: {}
+            Statement:
+              IPSetReferenceStatement:
+                Arn: !GetAtt ReportIPSet.Arn
+            VisibilityConfig:
+              SampledRequestsEnabled: true
+              CloudWatchMetricsEnabled: true
+              MetricName: !Sub "${ProjectName}-allow-listed"
+          - !Ref "AWS::NoValue"
+
   ReportDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
         Enabled: true
+        WebACLId: !If [WafEnabled, !GetAtt ReportWebACL.Arn, !Ref "AWS::NoValue"]
         Comment: !Sub "${ProjectName} AI Surface reports"
         DefaultRootObject: index.html
         PriceClass: PriceClass_100
@@ -572,6 +663,11 @@ Outputs:
   DistributionId:
     Description: CloudFront distribution ID (used for cache invalidation).
     Value: !Ref ReportDistribution
+
+  WebACLArn:
+    Condition: WafEnabled
+    Description: ARN of the WAF web ACL attached to the distribution.
+    Value: !GetAtt ReportWebACL.Arn
 
   ReportBucketName:
     Description: Reports bucket name (private; reachable only via CloudFront).

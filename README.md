@@ -90,6 +90,21 @@ aws cloudformation deploy \
 so only someone with the username/password can view them. To rotate the credential, redeploy
 the stack with a new value.
 
+To also restrict access by source IP with WAF (deploy in `us-east-1`):
+
+```bash
+aws cloudformation deploy \
+  --template-file template.yaml \
+  --stack-name apisec-ai-surface \
+  --region us-east-1 \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+      RepoOwner=apisec-inc RepoName=AI-Surface FullRepositoryId=apisec-inc/AI-Surface \
+      BasicAuthPassword='choose-a-strong-password' \
+      EnableWaf=true \
+      AllowedCidrs='203.0.113.0/24,198.51.100.10/32'
+```
+
 ### Authorize the GitHub connection (one-time)
 
 If you did **not** pass an existing `ExistingConnectionArn`, the stack creates a new
@@ -122,6 +137,9 @@ To reuse an already-authorized connection instead, pass its ARN:
 | `ReportRetentionDays` | `365` | Retention for timestamped report objects. |
 | `BasicAuthUsername` | `security` | Username required to view reports through CloudFront. |
 | `BasicAuthPassword` | — | Password required to view reports (min 8 chars, `NoEcho`). Required at deploy. |
+| `EnableWaf` | `false` | Attach an AWS WAF web ACL to CloudFront (IP allowlist + rate limit). Requires deploying in `us-east-1`. |
+| `AllowedCidrs` | `""` | Comma-separated IPv4 CIDRs allowed to reach reports (e.g. `203.0.113.0/24`). Empty = allow all IPs. Used only when `EnableWaf=true`. |
+| `WafRateLimitPerFiveMin` | `2000` | Requests per IP per 5 min before WAF blocks. Used only when `EnableWaf=true`. |
 
 ## Run a scan
 
@@ -187,8 +205,13 @@ for many repos — ask and it can be added.)
   function at deploy time from the stack parameters (the password parameter is `NoEcho`).
   Because CloudFront forces HTTPS, credentials are not sent in the clear.
 - Basic Auth is a single shared credential, not per-user identity. For individual logins,
-  MFA, or SSO federation, front the distribution with Cognito + Lambda@Edge instead. For an
-  IP allowlist, attach AWS WAF. The OAC only locks down S3-to-CloudFront, not viewer access.
+  MFA, or SSO federation, front the distribution with Cognito + Lambda@Edge instead.
+- **Optional WAF (`EnableWaf=true`)** adds an IP allowlist and a rate-based rule on the
+  distribution. With `AllowedCidrs` set, the web ACL defaults to *block* and only the listed
+  source IPs pass (and are still rate-limited) — a leaked Basic Auth password then can't be
+  used from outside your network. With no CIDRs, it defaults to *allow* and only rate-limits.
+  Because CloudFront-scoped WAF is global, **the stack must be deployed in `us-east-1` when
+  `EnableWaf=true`**. The OAC only locks down S3-to-CloudFront, not viewer access.
 - Each publish runs a CloudFront invalidation so the newest report is served immediately.
 - The scanner runs offline: it executes no code from the target repo, makes no network calls,
   and needs no credentials for the target app.
