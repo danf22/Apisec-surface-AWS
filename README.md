@@ -101,7 +101,6 @@ aws cloudformation deploy \
       RepoOwner=apisec-inc \
       RepoName=AI-Surface \
       RepoBranch=main \
-      FullRepositoryId=apisec-inc/AI-Surface \
       FailOn=never \
       BasicAuthUsername=security \
       BasicAuthPassword='choose-a-strong-password'
@@ -120,7 +119,7 @@ aws cloudformation deploy \
   --region us-east-1 \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
-      RepoOwner=apisec-inc RepoName=AI-Surface FullRepositoryId=apisec-inc/AI-Surface \
+      RepoOwner=apisec-inc RepoName=AI-Surface \
       BasicAuthPassword='choose-a-strong-password' \
       EnableWaf=true \
       AllowedCidrs='203.0.113.0/24,198.51.100.10/32'
@@ -152,7 +151,6 @@ To reuse an already-authorized connection instead, pass its ARN:
 | `RepoOwner` | — | GitHub org/user that owns the repo to scan. |
 | `RepoName` | — | Repository name to scan. |
 | `RepoBranch` | `main` | Branch to scan. |
-| `FullRepositoryId` | — | `owner/name` for the source action. |
 | `ExistingConnectionArn` | `""` | Reuse an existing connection; blank creates a new one. |
 | `FailOn` | `never` | `never` \| `high` \| `critical` — severity that fails the build. Keep `never` so the report always publishes. |
 | `ReportRetentionDays` | `365` | Retention for timestamped report objects. |
@@ -206,7 +204,7 @@ a distinct `ProjectName`:
 aws cloudformation deploy --template-file template.yaml \
   --stack-name ai-surface-service-a --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides ProjectName=ai-surface-service-a \
-      RepoOwner=my-org RepoName=service-a FullRepositoryId=my-org/service-a \
+      RepoOwner=my-org RepoName=service-a \
       ExistingConnectionArn=arn:aws:codeconnections:...:connection/xxxx
 ```
 

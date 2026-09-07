@@ -32,12 +32,6 @@ Parameters:
     Default: main
     Description: Branch of the target repository to scan.
 
-  FullRepositoryId:
-    Type: String
-    Description: >
-      Full repository id in "owner/name" form used by the CodeStar connection
-      source action (e.g. apisec-inc/AI-Surface).
-
   ExistingConnectionArn:
     Type: String
     Default: ""
@@ -631,7 +625,7 @@ Resources:
                   - CreateConnection
                   - !Ref GitHubConnection
                   - !Ref ExistingConnectionArn
-                FullRepositoryId: !Ref FullRepositoryId
+                FullRepositoryId: !Sub "${RepoOwner}/${RepoName}"
                 BranchName: !Ref RepoBranch
                 OutputArtifactFormat: CODE_ZIP
               OutputArtifacts:
