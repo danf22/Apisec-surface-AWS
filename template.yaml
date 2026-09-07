@@ -62,6 +62,22 @@ Parameters:
     Default: 365
     Description: Days to retain timestamped report objects in the reports bucket.
 
+  BasicAuthUsername:
+    Type: String
+    Default: security
+    MinLength: 1
+    Description: >
+      Username required to view reports through CloudFront (HTTP Basic Auth).
+
+  BasicAuthPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: >
+      Password required to view reports through CloudFront (HTTP Basic Auth).
+      Min 8 characters. Stored in the CloudFront Function code at deploy time;
+      rotate by updating the stack with a new value.
+
 Conditions:
   CreateConnection: !Equals [!Ref ExistingConnectionArn, ""]
 
@@ -162,25 +178,53 @@ Resources:
         SigningBehavior: always
         SigningProtocol: sigv4
 
-  # Rewrites requests ending in "/" (or with no file extension) to ".../index.html"
-  # so folder URLs like /latest/owner/repo/ resolve to the report page. The S3
-  # REST origin (required by OAC) does not do index-document resolution itself.
+  # Viewer-request function that does TWO things, in order:
+  #   1. HTTP Basic Auth  — require a username/password before serving anything,
+  #      so only the security team can view reports. Returns 401 (browser login
+  #      prompt) when the Authorization header is missing or wrong. The expected
+  #      credential is baked in at deploy time from stack parameters.
+  #   2. Index rewrite     — map directory-style URLs (".../" or extension-less)
+  #      to ".../index.html", since the OAC S3 REST origin does no index-document
+  #      resolution itself.
+  # A distribution can associate only one function per event type, so both live
+  # here. Basic Auth is base64-over-HTTPS: reversible on its own, but the viewer
+  # protocol policy forces HTTPS so credentials are not sent in the clear.
   ReportIndexFunction:
     Type: AWS::CloudFront::Function
     Properties:
-      Name: !Sub "${ProjectName}-index-rewrite"
+      Name: !Sub "${ProjectName}-auth-index"
       AutoPublish: true
       FunctionConfig:
-        Comment: Append index.html to directory-style requests.
+        Comment: Basic Auth gate + index.html rewrite for AI Surface reports.
         Runtime: cloudfront-js-2.0
-      FunctionCode: |
+      FunctionCode: !Sub |
         function handler(event) {
           var request = event.request;
+          var headers = request.headers;
+
+          // ---- 1. HTTP Basic Auth ----
+          var user = "${BasicAuthUsername}";
+          var pass = "${BasicAuthPassword}";
+          var expected = "Basic " + String.bytesFrom(user + ":" + pass, "utf-8").toString("base64");
+
+          var provided = (headers.authorization && headers.authorization.value) || "";
+          if (provided !== expected) {
+            return {
+              statusCode: 401,
+              statusDescription: "Unauthorized",
+              headers: {
+                "www-authenticate": { value: "Basic realm=\"AI Surface Reports\"" },
+                "cache-control": { value: "no-store" }
+              }
+            };
+          }
+
+          // ---- 2. Index rewrite ----
           var uri = request.uri;
-          if (uri.endsWith('/')) {
-            request.uri = uri + 'index.html';
-          } else if (!uri.split('/').pop().includes('.')) {
-            request.uri = uri + '/index.html';
+          if (uri.endsWith("/")) {
+            request.uri = uri + "index.html";
+          } else if (!uri.split("/").pop().includes(".")) {
+            request.uri = uri + "/index.html";
           }
           return request;
         }

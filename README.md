@@ -78,8 +78,14 @@ aws cloudformation deploy \
       RepoName=AI-Surface \
       RepoBranch=main \
       FullRepositoryId=apisec-inc/AI-Surface \
-      FailOn=never
+      FailOn=never \
+      BasicAuthUsername=security \
+      BasicAuthPassword='choose-a-strong-password'
 ```
+
+`BasicAuthPassword` is required — the reports are gated behind HTTP Basic Auth at CloudFront,
+so only someone with the username/password can view them. To rotate the credential, redeploy
+the stack with a new value.
 
 ### Authorize the GitHub connection (one-time)
 
@@ -111,6 +117,8 @@ To reuse an already-authorized connection instead, pass its ARN:
 | `ExistingConnectionArn` | `""` | Reuse an existing connection; blank creates a new one. |
 | `FailOn` | `never` | `never` \| `high` \| `critical` — severity that fails the build. Keep `never` so the report always publishes. |
 | `ReportRetentionDays` | `365` | Retention for timestamped report objects. |
+| `BasicAuthUsername` | `security` | Username required to view reports through CloudFront. |
+| `BasicAuthPassword` | — | Password required to view reports (min 8 chars, `NoEcho`). Required at deploy. |
 
 ## Run a scan
 
@@ -170,9 +178,14 @@ for many repos — ask and it can be added.)
   through the CloudFront distribution** via Origin Access Control (OAC); the bucket policy
   allows `s3:GetObject` only for this distribution (scoped by `AWS:SourceArn`). The old
   `s3-website` endpoint no longer exists — use the CloudFront URL from the stack outputs.
-- CloudFront serves over HTTPS (`redirect-to-https`). To restrict *who* can reach CloudFront
-  (e.g. office IPs or SSO), attach AWS WAF to the distribution or put it behind Cognito /
-  signed URLs — the OAC only locks down S3-to-CloudFront, not viewer access.
+- **Viewer access is gated by HTTP Basic Auth** enforced in a CloudFront Function on every
+  viewer request: without the correct `BasicAuthUsername` / `BasicAuthPassword` the browser
+  gets a `401` login prompt and no report is served. The credential is baked into the
+  function at deploy time from the stack parameters (the password parameter is `NoEcho`).
+  Because CloudFront forces HTTPS, credentials are not sent in the clear.
+- Basic Auth is a single shared credential, not per-user identity. For individual logins,
+  MFA, or SSO federation, front the distribution with Cognito + Lambda@Edge instead. For an
+  IP allowlist, attach AWS WAF. The OAC only locks down S3-to-CloudFront, not viewer access.
 - Each publish runs a CloudFront invalidation so the newest report is served immediately.
 - The scanner runs offline: it executes no code from the target repo, makes no network calls,
   and needs no credentials for the target app.
