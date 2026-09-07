@@ -48,8 +48,8 @@ a variant — but functionally it is not required here.
 
 | File | Purpose |
 |---|---|
-| `template.yaml` | CloudFormation stack: buckets, IAM roles, CodeBuild, CodePipeline, connection. |
-| `buildspec.yml` | CodeBuild steps: install, scan, build HTML, publish to S3. |
+| `template.yaml` | CloudFormation stack: buckets, IAM roles, CodeBuild, CodePipeline, connection. The build steps are **inlined** in the CodeBuild project. |
+| `buildspec.yml` | Readable source-of-truth copy of the build steps. **Not read at runtime** — the pipeline source is the scanned repo, which does not contain this file, so the buildspec is inlined in `template.yaml`. Keep the two in sync. |
 
 ## Prerequisites
 

@@ -1,5 +1,10 @@
 version: 0.2
 
+# NOTE: This file is the readable source-of-truth copy. CodeBuild does NOT read
+# it from the scanned repo — the pipeline source IS the scanned repo, which does
+# not contain this file. The effective buildspec is inlined in template.yaml
+# (ScanProject.Source.BuildSpec). Keep the two in sync when editing.
+#
 # Runs apisec-inc/AI-Surface against the source repo checked out by CodePipeline,
 # generates a web (HTML) report plus machine-readable evidence (JSON / SARIF /
 # CycloneDX AI-BOM), and publishes everything to the reports S3 bucket under a
@@ -23,7 +28,7 @@ phases:
       - echo "Installing apisec-ai-surface..."
       - python -m pip install --upgrade pip
       - pip install apisec-ai-surface
-      - ai-surface --version || true
+      - ai-surface --help > /dev/null 2>&1 && echo "ai-surface installed" || true
 
   build:
     commands:
