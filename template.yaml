@@ -1,0 +1,331 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  APIsec AI-Surface scanning pipeline. CodePipeline pulls a target GitHub repo
+  through a CodeStar (GitHub) connection, CodeBuild runs apisec-inc/AI-Surface
+  against it, and the generated HTML report (plus JSON / SARIF / CycloneDX AI-BOM
+  evidence) is published to an S3 static-website bucket for the security team.
+
+# ---------------------------------------------------------------------------
+# NOTE on CodeDeploy:
+#   ai-surface is an offline static analysis scanner. It produces a report; it
+#   does not deploy a running application to compute (EC2/Lambda/ECS), which is
+#   what the CodeDeploy service is for. The "deploy" step in this flow is the
+#   publication of the report to S3, handled inside CodeBuild. See README.md.
+# ---------------------------------------------------------------------------
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: apisec-ai-surface
+    Description: Name prefix applied to created resources.
+
+  RepoOwner:
+    Type: String
+    Description: GitHub org/user that owns the repository to scan (e.g. apisec-inc).
+
+  RepoName:
+    Type: String
+    Description: Repository name to scan (e.g. AI-Surface).
+
+  RepoBranch:
+    Type: String
+    Default: main
+    Description: Branch of the target repository to scan.
+
+  FullRepositoryId:
+    Type: String
+    Description: >
+      Full repository id in "owner/name" form used by the CodeStar connection
+      source action (e.g. apisec-inc/AI-Surface).
+
+  ExistingConnectionArn:
+    Type: String
+    Default: ""
+    Description: >
+      Optional. ARN of an existing CodeStar/CodeConnections GitHub connection.
+      Leave blank to create a new connection (which must then be authorized once
+      in the console: Developer Tools > Settings > Connections).
+
+  FailOn:
+    Type: String
+    Default: never
+    AllowedValues:
+      - never
+      - high
+      - critical
+    Description: >
+      Severity that fails the build. "never" always publishes the report even
+      when risks are found (recommended so the security team always gets a report).
+
+  ReportRetentionDays:
+    Type: Number
+    Default: 365
+    Description: Days to retain timestamped report objects in the reports bucket.
+
+Conditions:
+  CreateConnection: !Equals [!Ref ExistingConnectionArn, ""]
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # GitHub connection (only created when an existing ARN is not supplied)
+  # ---------------------------------------------------------------------------
+  GitHubConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Condition: CreateConnection
+    Properties:
+      ConnectionName: !Sub "${ProjectName}-gh"
+      ProviderType: GitHub
+
+  # ---------------------------------------------------------------------------
+  # S3 buckets
+  # ---------------------------------------------------------------------------
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-artifacts-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-artifacts
+            Status: Enabled
+            ExpirationInDays: 30
+
+  ReportBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-reports-${AWS::AccountId}-${AWS::Region}"
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: false
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: false
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-timestamped-reports
+            Status: Enabled
+            Prefix: reports/
+            ExpirationInDays: !Ref ReportRetentionDays
+
+  # Static-website read access. NOTE: this makes reports readable by anyone with
+  # the URL. For internal-only access, remove this policy and front the bucket
+  # with CloudFront + OAC or restrict by aws:SourceVpce / IP (see README).
+  ReportBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ReportBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadForWebsite
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${ReportBucket.Arn}/*"
+
+  # ---------------------------------------------------------------------------
+  # IAM roles
+  # ---------------------------------------------------------------------------
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-codebuild-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: codebuild-inline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}*"
+              - Sid: Artifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:GetBucketLocation
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+              - Sid: PublishReports
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Resource:
+                  - !GetAtt ReportBucket.Arn
+                  - !Sub "${ReportBucket.Arn}/*"
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-pipeline-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: pipeline-inline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Artifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:GetBucketLocation
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+              - Sid: StartBuild
+                Effect: Allow
+                Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                Resource: !GetAtt ScanProject.Arn
+              - Sid: UseConnection
+                Effect: Allow
+                Action:
+                  - codestar-connections:UseConnection
+                  - codeconnections:UseConnection
+                Resource: !If
+                  - CreateConnection
+                  - !Ref GitHubConnection
+                  - !Ref ExistingConnectionArn
+
+  # ---------------------------------------------------------------------------
+  # CodeBuild project: runs ai-surface and publishes the report to S3
+  # ---------------------------------------------------------------------------
+  ScanProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${ProjectName}-scan"
+      Description: Runs apisec-inc/AI-Surface against the source repo and publishes reports to S3.
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        EnvironmentVariables:
+          - Name: REPORT_BUCKET
+            Value: !Ref ReportBucket
+          - Name: REPO_NAME
+            Value: !Ref RepoName
+          - Name: REPO_OWNER
+            Value: !Ref RepoOwner
+          - Name: FAIL_ON
+            Value: !Ref FailOn
+      TimeoutInMinutes: 30
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+
+  # ---------------------------------------------------------------------------
+  # CodePipeline: Source (GitHub via connection) -> Build (scan + publish)
+  # ---------------------------------------------------------------------------
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "${ProjectName}-pipeline"
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GitHubSource
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !If
+                  - CreateConnection
+                  - !Ref GitHubConnection
+                  - !Ref ExistingConnectionArn
+                FullRepositoryId: !Ref FullRepositoryId
+                BranchName: !Ref RepoBranch
+                OutputArtifactFormat: CODE_ZIP
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: ScanAndPublish
+          Actions:
+            - Name: AiSurfaceScan
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref ScanProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: ReportOutput
+
+Outputs:
+  ReportWebsiteUrl:
+    Description: Base URL of the S3-hosted report site. Latest report is at /latest/index.html.
+    Value: !GetAtt ReportBucket.WebsiteURL
+
+  LatestReportUrl:
+    Description: Stable URL the security team can bookmark for the most recent scan.
+    Value: !Sub "${ReportBucket.WebsiteURL}/latest/index.html"
+
+  ReportBucketName:
+    Description: Reports bucket name.
+    Value: !Ref ReportBucket
+
+  PipelineName:
+    Description: CodePipeline name.
+    Value: !Ref Pipeline
+
+  ConnectionArn:
+    Description: The GitHub connection ARN in use. Authorize it in the console if newly created.
+    Value: !If [CreateConnection, !Ref GitHubConnection, !Ref ExistingConnectionArn]
