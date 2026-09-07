@@ -202,10 +202,16 @@ Resources:
           var request = event.request;
           var headers = request.headers;
 
+          // NOTE: the CloudFront Functions runtime is ES5.1-based. Avoid ES6
+          // helpers like String.endsWith / Array.includes here (they raise a
+          // runtime error -> 503). Use indexOf / substr instead.
+
           // ---- 1. HTTP Basic Auth ----
+          // Use Buffer.from(...).toString("base64") for base64. (String.bytesFrom
+          // is deprecated in the current runtime and raises a SyntaxError -> 503.)
           var user = "${BasicAuthUsername}";
           var pass = "${BasicAuthPassword}";
-          var expected = "Basic " + String.bytesFrom(user + ":" + pass, "utf-8").toString("base64");
+          var expected = "Basic " + Buffer.from(user + ":" + pass).toString("base64");
 
           var provided = (headers.authorization && headers.authorization.value) || "";
           if (provided !== expected) {
@@ -221,9 +227,11 @@ Resources:
 
           // ---- 2. Index rewrite ----
           var uri = request.uri;
-          if (uri.endsWith("/")) {
+          var lastSlash = uri.lastIndexOf("/");
+          var lastSegment = uri.substring(lastSlash + 1);
+          if (uri.charAt(uri.length - 1) === "/") {
             request.uri = uri + "index.html";
-          } else if (!uri.split("/").pop().includes(".")) {
+          } else if (lastSegment.indexOf(".") === -1) {
             request.uri = uri + "/index.html";
           }
           return request;
