@@ -8,9 +8,15 @@ to S3 so the security team can review the findings.
 
 ![APIsec AI-Surface scanning pipeline architecture](docs/diagrams/apisec-ai-surface-pipeline.png)
 
-For the **interactive** version (search, route tracing, themes, export), open
-[`docs/diagrams/apisec-ai-surface-pipeline.html`](docs/diagrams/apisec-ai-surface-pipeline.html)
-in a browser.
+For the **interactive** version (search, route tracing, themes, export):
+
+- **Open it rendered in your browser (no clone needed):**
+  [htmlpreview.github.io view](https://htmlpreview.github.io/?https://github.com/danf22/Apisec-surface-AWS/blob/main/docs/diagrams/apisec-ai-surface-pipeline.html)
+- **Or open the local file** [`docs/diagrams/apisec-ai-surface-pipeline.html`](docs/diagrams/apisec-ai-surface-pipeline.html) directly in a browser.
+
+> Clicking the `.html` file on GitHub shows its source, not the rendered page — GitHub does
+> not execute HTML. Use the htmlpreview link above, or open the file locally. (The preview
+> proxy is a third party and only works after the file is pushed to the default branch.)
 
 <sub>Generated with [Archify](https://github.com/tt-a1i/archify) from the typed source
 [`docs/diagrams/apisec-ai-surface-pipeline.architecture.json`](docs/diagrams/apisec-ai-surface-pipeline.architecture.json).
