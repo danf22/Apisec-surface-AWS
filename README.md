@@ -6,9 +6,12 @@ to S3 so the security team can review the findings.
 
 ## How it works
 
-![APIsec AI-Surface scanning pipeline architecture](docs/diagrams/apisec-ai-surface-pipeline.png)
+**Interactive architecture diagram:** [`docs/diagrams/apisec-ai-surface-pipeline.html`](docs/diagrams/apisec-ai-surface-pipeline.html)
+— open it in a browser for the live, navigable system map (search, trace routes, themes, export).
 
-<sub>Diagram source: [`docs/diagrams/apisec-ai-surface-pipeline.py`](docs/diagrams/apisec-ai-surface-pipeline.py)</sub>
+<sub>Generated with [Archify](https://github.com/tt-a1i/archify) from the typed source
+[`docs/diagrams/apisec-ai-surface-pipeline.architecture.json`](docs/diagrams/apisec-ai-surface-pipeline.architecture.json).
+Regenerate: `node archify/bin/archify.mjs deliver architecture docs/diagrams/apisec-ai-surface-pipeline.architecture.json docs/diagrams/apisec-ai-surface-pipeline.html --quality showcase`</sub>
 
 ```
 GitHub repo ──(CodeStar connection)──▶ CodePipeline

@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "APIsec AI-Surface Scanning Pipeline",
+    "output": "apisec-ai-surface-pipeline.html",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "scan-path", "label": "Scan and publish path", "focus": ["github", "connection", "pipeline", "codebuild", "reports"], "note": "Follow a scan from the GitHub source through CodeBuild to the reports bucket." },
+      { "id": "delivery", "label": "Secure delivery", "focus": ["reports", "cloudfront", "auth", "security"], "note": "How the security team reaches reports: CloudFront + OAC, gated by Basic Auth." },
+      { "id": "gate", "label": "Access controls", "focus": ["oac", "auth", "reports", "cloudfront"], "note": "Private bucket reachable only via CloudFront; viewers pass HTTP Basic Auth." }
+    ]
+  },
+  "components": [
+    { "id": "github", "type": "external", "label": "GitHub Repo", "sublabel": "target repo", "pos": [40, 300], "size": [130, 60] },
+    { "id": "connection", "type": "security", "label": "CodeStar Connection", "sublabel": "GitHub OAuth", "pos": [210, 300], "size": [150, 60], "tag": "authorized once" },
+    { "id": "pipeline", "type": "cloud", "label": "CodePipeline", "sublabel": "Source -> Build", "pos": [400, 300], "size": [140, 60] },
+    { "id": "codebuild", "type": "backend", "label": "CodeBuild", "sublabel": "runs ai-surface", "pos": [580, 300], "size": [140, 60], "tag": "prepare_ui_dir()" },
+    { "id": "artifacts", "type": "cloud", "label": "Artifact Bucket", "sublabel": "S3 (pipeline)", "pos": [400, 150], "size": [140, 60] },
+    { "id": "reports", "type": "database", "label": "Reports Bucket", "sublabel": "S3 private", "pos": [760, 300], "size": [150, 60], "tag": "access blocked" },
+    { "id": "oac", "type": "security", "label": "Origin Access Control", "sublabel": "OAC (SigV4)", "pos": [755, 150], "size": [160, 60] },
+    { "id": "cloudfront", "type": "cloud", "label": "CloudFront", "sublabel": "HTTPS", "pos": [950, 300], "size": [140, 60] },
+    { "id": "auth", "type": "security", "label": "Basic Auth Function", "sublabel": "viewer-request", "pos": [945, 150], "size": [150, 64], "tag": "user + password" },
+    { "id": "security", "type": "external", "label": "Security Team", "sublabel": "Browser", "pos": [1130, 300], "size": [130, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "AWS Account / Region", "wraps": ["pipeline", "codebuild", "artifacts", "reports", "oac", "cloudfront", "auth"] },
+    { "kind": "security-group", "label": "Private (CloudFront-only access)", "wraps": ["reports", "oac"] }
+  ],
+  "connections": [
+    { "id": "gh-to-conn", "from": "github", "to": "connection", "label": "source", "variant": "emphasis" },
+    { "id": "conn-to-pipe", "from": "connection", "to": "pipeline", "variant": "security" },
+    { "id": "pipe-to-build", "from": "pipeline", "to": "codebuild", "label": "invoke build", "variant": "emphasis", "labelDy": -24 },
+    { "id": "pipe-artifacts", "from": "pipeline", "to": "artifacts", "label": "artifacts", "variant": "dashed", "fromSide": "top", "toSide": "bottom", "labelDy": -68 },
+    { "id": "build-to-reports", "from": "codebuild", "to": "reports", "label": "upload UI bundle", "variant": "emphasis", "labelDy": 54 },
+    { "id": "build-invalidate", "from": "codebuild", "to": "cloudfront", "label": "invalidate cache", "variant": "dashed", "fromSide": "bottom", "toSide": "bottom", "via": [[650, 400], [1020, 400]], "labelDy": 54 },
+    { "id": "cf-to-reports", "from": "cloudfront", "to": "reports", "label": "origin fetch", "labelDy": -64 },
+    { "id": "oac-signs", "from": "oac", "to": "reports", "label": "SigV4 read", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 68, "labelDx": -40 },
+    { "id": "auth-gate", "from": "auth", "to": "cloudfront", "label": "gate viewers", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelDy": 68, "labelDx": 40 },
+    { "id": "cf-to-team", "from": "cloudfront", "to": "security", "label": "HTTPS + login", "variant": "emphasis", "labelDy": -24 }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Pipeline", "items": ["CodePipeline pulls the repo via CodeStar connection", "CodeBuild installs ai-surface and scans the code", "Builds the interactive --ui bundle with prepare_ui_dir()"] },
+    { "dot": "emerald", "title": "Reports", "items": ["Interactive attack-surface map + JSON/SARIF/CycloneDX", "Timestamped history plus a stable latest/ URL", "Cache invalidated on every publish"] },
+    { "dot": "rose", "title": "Access control", "items": ["Reports bucket is private; all public access blocked", "Reachable only via CloudFront using OAC (SigV4)", "HTTP Basic Auth gates viewers over HTTPS"] }
+  ]
+}
