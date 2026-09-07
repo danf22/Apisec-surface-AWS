@@ -17,8 +17,10 @@ GitHub repo ──(CodeStar connection)──▶ CodePipeline
                                           │
                                           └─ ScanAndPublish stage (CodeBuild):
                                                 • pip install apisec-ai-surface
-                                                • ai-surface scan . (markdown/json/sarif/cyclonedx)
-                                                • build index.html report
+                                                • scan the repo
+                                                • build the interactive UI bundle
+                                                  (index.html + app.js + styles.css
+                                                   + report.json + ai-bom.json)
                                                 • upload to S3 reports bucket
                                                         │
                                                         ▼
@@ -27,9 +29,13 @@ GitHub repo ──(CodeStar connection)──▶ CodePipeline
 
 - **CodePipeline** orchestrates the run. The Source stage pulls the target repo through
   an AWS **CodeStar/CodeConnections GitHub connection**; the ScanAndPublish stage invokes CodeBuild.
-- **CodeBuild** installs `ai-surface`, scans the checked-out repo, generates an HTML report
-  plus JSON / SARIF / CycloneDX AI-BOM evidence, and uploads them to the reports S3 bucket.
-- **S3** hosts the report as a static website with a stable `latest/` URL.
+- **CodeBuild** installs `ai-surface`, scans the checked-out repo, and builds the same
+  **interactive attack-surface map** that `ai-surface scan . --ui` serves locally — as a
+  static bundle (`index.html`, `app.js`, `styles.css`, `report.json`, `ai-bom.json`) using
+  the tool's own `prepare_ui_dir()`. It also writes SARIF and CycloneDX evidence alongside,
+  then uploads everything to the reports S3 bucket.
+- **S3** hosts the interactive report as a static website with a stable `latest/` URL. The
+  UI is pure client-side (it fetches `./report.json`), so no server is needed on S3.
 
 ### A note on CodeDeploy
 
@@ -48,8 +54,7 @@ a variant — but functionally it is not required here.
 
 | File | Purpose |
 |---|---|
-| `template.yaml` | CloudFormation stack: buckets, IAM roles, CodeBuild, CodePipeline, connection. The build steps are **inlined** in the CodeBuild project. |
-| `buildspec.yml` | Readable source-of-truth copy of the build steps. **Not read at runtime** — the pipeline source is the scanned repo, which does not contain this file, so the buildspec is inlined in `template.yaml`. Keep the two in sync. |
+| `template.yaml` | CloudFormation stack: buckets, IAM roles, CodeBuild, CodePipeline, connection. The build steps (install `ai-surface`, scan, build the interactive UI bundle, publish to S3) are **inlined** in the CodeBuild project, since the pipeline source is the scanned repo and would not contain a separate buildspec file. |
 
 ## Prerequisites
 
@@ -124,8 +129,10 @@ aws cloudformation describe-stacks --stack-name apisec-ai-surface \
 - **`ReportWebsiteUrl`** — base website URL. Every scan is also kept immutably under
   `reports/<owner>/<name>/<timestamp>/index.html`.
 
-Each report page links to the raw `report.json`, `report.sarif`, and `ai-bom.cyclonedx.json`
-evidence next to it.
+The report is the interactive attack-surface map (nodes grouped by category, risk badges,
+governance mappings, and an AI-BOM download) — the same view as the local `--ui` server.
+The raw `report.json`, `report.sarif`, and `ai-bom.cyclonedx.json` evidence sit next to it
+for download and automation.
 
 ## Scanning multiple repositories
 

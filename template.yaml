@@ -263,9 +263,9 @@ Resources:
       Source:
         Type: CODEPIPELINE
         # Inlined so the build does NOT depend on a buildspec.yml inside the
-        # scanned repo. (The scanned repo is the CodePipeline source, and it
-        # will not contain this file.) See buildspec.yml in this repo for the
-        # readable/source-of-truth copy; keep the two in sync when editing.
+        # scanned repo. The scanned repo is the CodePipeline source and would
+        # not contain this file, so the build steps live here as the single
+        # source of truth.
         BuildSpec: |
           version: 0.2
           env:
@@ -278,7 +278,7 @@ Resources:
               commands:
                 - echo "Installing apisec-ai-surface..."
                 - python -m pip install --upgrade pip
-                - pip install apisec-ai-surface markdown
+                - pip install apisec-ai-surface
                 - ai-surface --help > /dev/null 2>&1 && echo "ai-surface installed" || true
             build:
               commands:
@@ -287,56 +287,40 @@ Resources:
                 - export SCAN_TS="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
                 - export PREFIX="reports/${REPO_OWNER}/${REPO_NAME}/${SCAN_TS}"
                 - echo "Scanning ${REPO_OWNER}/${REPO_NAME} at ${SCAN_TS}"
-                - ai-surface scan . --output markdown  --governance > "$OUT_DIR/report.md"   || true
-                - ai-surface scan . --output json      > "$OUT_DIR/report.json"              || true
-                - ai-surface scan . --output sarif     > "$OUT_DIR/report.sarif"             || true
-                - ai-surface scan . --output cyclonedx > "$OUT_DIR/ai-bom.cyclonedx.json"    || true
+
+                # Machine-readable evidence for download (kept alongside the UI).
+                - ai-surface scan . --output json      > "$OUT_DIR/report.json"           || true
+                - ai-surface scan . --output sarif     > "$OUT_DIR/report.sarif"          || true
+                - ai-surface scan . --output cyclonedx > "$OUT_DIR/ai-bom.cyclonedx.json" || true
+
+                # Build the SAME interactive UI that `ai-surface scan . --ui` serves
+                # locally, but as a static bundle (index.html + app.js + styles.css +
+                # report.json + ai-bom.json). We reuse the tool's own prepare_ui_dir()
+                # so the output matches the loopback viewer exactly. No server needed:
+                # the UI is pure client-side and fetches ./report.json.
                 - |
                   python - <<'PY'
-                  import os, html
-                  import markdown
-                  out_dir = os.environ["OUT_DIR"]
-                  owner = os.environ.get("REPO_OWNER", "")
-                  name = os.environ.get("REPO_NAME", "")
-                  ts = os.environ.get("SCAN_TS", "")
-                  md_path = os.path.join(out_dir, "report.md")
-                  try:
-                      with open(md_path, encoding="utf-8") as f:
-                          md_text = f.read()
-                  except FileNotFoundError:
-                      md_text = "_No markdown report was produced. Check the build logs._"
-                  body = markdown.markdown(md_text, extensions=["fenced_code", "tables", "sane_lists"])
-                  page = f"""<!doctype html>
-                  <html lang="en"><head><meta charset="utf-8">
-                  <meta name="viewport" content="width=device-width, initial-scale=1">
-                  <title>AI Surface Report - {html.escape(owner)}/{html.escape(name)}</title>
-                  <style>
-                    body {{ font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-                            max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #1b1b1f; line-height: 1.5; }}
-                    header {{ border-bottom: 2px solid #00a99d; margin-bottom: 1.5rem; padding-bottom: .75rem; }}
-                    h1 {{ font-size: 1.4rem; }} .meta {{ color: #555; font-size: .85rem; }}
-                    pre {{ background: #0d1117; color: #e6edf3; padding: 1rem; border-radius: 6px; overflow-x: auto; }}
-                    code {{ font-family: SFMono-Regular, Menlo, Consolas, monospace; }}
-                    table {{ border-collapse: collapse; width: 100%; }}
-                    th, td {{ border: 1px solid #ddd; padding: .4rem .6rem; text-align: left; }}
-                    .links a {{ margin-right: 1rem; }}
-                  </style></head><body>
-                  <header><h1>AI Attack Surface Report</h1>
-                  <div class="meta">Repository: {html.escape(owner)}/{html.escape(name)} &middot; Scan: {html.escape(ts)} UTC</div>
-                  <div class="meta links">Evidence:
-                    <a href="report.json">JSON</a><a href="report.sarif">SARIF</a>
-                    <a href="ai-bom.cyclonedx.json">CycloneDX AI-BOM</a><a href="report.md">Markdown</a></div>
-                  </header><main>{body}</main>
-                  <footer class="meta">Generated by apisec-inc/AI-Surface via AWS CodePipeline/CodeBuild.</footer>
-                  </body></html>"""
-                  with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f:
-                      f.write(page)
-                  print("Wrote", os.path.join(out_dir, "index.html"))
+                  import os
+                  from pathlib import Path
+                  from ai_surface.orchestrator import Orchestrator, default_detectors
+                  from ai_surface.ui_server import prepare_ui_dir
+
+                  out_dir = Path(os.environ["OUT_DIR"])
+                  report = Orchestrator(default_detectors()).run(".")
+                  # Copies index.html/styles.css/app.js and writes report.json + ai-bom.json
+                  prepare_ui_dir(report, dest=out_dir)
+                  assert (out_dir / "index.html").is_file(), "UI bundle missing index.html"
+                  print("UI bundle ready:", sorted(p.name for p in out_dir.iterdir()))
                   PY
-                - echo "Publishing report to s3://${REPORT_BUCKET}/${PREFIX}/"
+
+                # Publish: timestamped (immutable history) + latest (stable URL).
+                - echo "Publishing interactive report to s3://${REPORT_BUCKET}/${PREFIX}/"
                 - aws s3 cp "$OUT_DIR/" "s3://${REPORT_BUCKET}/${PREFIX}/" --recursive
                 - aws s3 cp "$OUT_DIR/" "s3://${REPORT_BUCKET}/latest/${REPO_OWNER}/${REPO_NAME}/" --recursive
-                - aws s3 cp "$OUT_DIR/index.html" "s3://${REPORT_BUCKET}/latest/index.html"
+                # Root landing page points at the newest scan for this repo.
+                - aws s3 cp "$OUT_DIR/" "s3://${REPORT_BUCKET}/latest/" --recursive
+
+                # Optional severity gate, applied AFTER the report is published.
                 - |
                   if [ "${FAIL_ON}" != "never" ]; then
                     echo "Re-running scan with --fail-on ${FAIL_ON} for the build gate..."
