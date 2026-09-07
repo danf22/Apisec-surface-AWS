@@ -288,10 +288,19 @@ Resources:
                 - export PREFIX="reports/${REPO_OWNER}/${REPO_NAME}/${SCAN_TS}"
                 - echo "Scanning ${REPO_OWNER}/${REPO_NAME} at ${SCAN_TS}"
 
+                # ai-surface labels the report with the BASENAME of the scan root
+                # (a privacy feature). CodeBuild checks the source out into a
+                # "src<random>" dir, which would show up as the project name. Copy
+                # the source into a dir named after the repo so the map title reads
+                # the real repo name (e.g. "yw-core") instead of "src".
+                - export SCAN_DIR="/tmp/${REPO_NAME}"
+                - mkdir -p "$SCAN_DIR"
+                - cp -a . "$SCAN_DIR/"
+
                 # Machine-readable evidence for download (kept alongside the UI).
-                - ai-surface scan . --output json      > "$OUT_DIR/report.json"           || true
-                - ai-surface scan . --output sarif     > "$OUT_DIR/report.sarif"          || true
-                - ai-surface scan . --output cyclonedx > "$OUT_DIR/ai-bom.cyclonedx.json" || true
+                - ai-surface scan "$SCAN_DIR" --output json      > "$OUT_DIR/report.json"           || true
+                - ai-surface scan "$SCAN_DIR" --output sarif     > "$OUT_DIR/report.sarif"          || true
+                - ai-surface scan "$SCAN_DIR" --output cyclonedx > "$OUT_DIR/ai-bom.cyclonedx.json" || true
 
                 # Build the SAME interactive UI that `ai-surface scan . --ui` serves
                 # locally, but as a static bundle (index.html + app.js + styles.css +
@@ -306,10 +315,29 @@ Resources:
                   from ai_surface.ui_server import prepare_ui_dir
 
                   out_dir = Path(os.environ["OUT_DIR"])
-                  report = Orchestrator(default_detectors()).run(".")
+                  scan_dir = os.environ.get("SCAN_DIR", ".")
+                  report = Orchestrator(default_detectors()).run(scan_dir)
                   # Copies index.html/styles.css/app.js and writes report.json + ai-bom.json
                   prepare_ui_dir(report, dest=out_dir)
-                  assert (out_dir / "index.html").is_file(), "UI bundle missing index.html"
+                  index = out_dir / "index.html"
+                  assert index.is_file(), "UI bundle missing index.html"
+
+                  # The UI shows an empty "scan a repo" form by default and only
+                  # auto-loads report.json when the URL has ?demo / #demo (the
+                  # local --ui server relies on its live /api/scan endpoint,
+                  # which does not exist on a static S3 host). Inject a tiny
+                  # bootstrap that sets #demo before app.js runs, so the hosted
+                  # page lands directly on the populated map.
+                  html = index.read_text(encoding="utf-8")
+                  boot = (
+                      '<script>if(!/(\\?|&)demo\\b/.test(location.search)'
+                      '&&location.hash!=="#demo"){location.hash="#demo";}</script>'
+                  )
+                  marker = '<script src="./app.js"'
+                  assert marker in html, "app.js script tag not found in index.html"
+                  html = html.replace(marker, boot + "\n  " + marker, 1)
+                  index.write_text(html, encoding="utf-8")
+
                   print("UI bundle ready:", sorted(p.name for p in out_dir.iterdir()))
                   PY
 
@@ -317,8 +345,24 @@ Resources:
                 - echo "Publishing interactive report to s3://${REPORT_BUCKET}/${PREFIX}/"
                 - aws s3 cp "$OUT_DIR/" "s3://${REPORT_BUCKET}/${PREFIX}/" --recursive
                 - aws s3 cp "$OUT_DIR/" "s3://${REPORT_BUCKET}/latest/${REPO_OWNER}/${REPO_NAME}/" --recursive
-                # Root landing page points at the newest scan for this repo.
+                # Also mirror to /latest/ so that path serves the newest report directly.
                 - aws s3 cp "$OUT_DIR/" "s3://${REPORT_BUCKET}/latest/" --recursive
+
+                # Root landing page: opening the bare S3 website URL (no path) looks
+                # for index.html at the bucket root. Write one that redirects to the
+                # latest report so the site auto-opens the map.
+                - |
+                  cat > /tmp/root-index.html <<HTML
+                  <!doctype html><html><head><meta charset="utf-8">
+                  <title>AI Surface Reports</title>
+                  <meta http-equiv="refresh" content="0; url=./latest/${REPO_OWNER}/${REPO_NAME}/index.html#demo">
+                  <link rel="canonical" href="./latest/${REPO_OWNER}/${REPO_NAME}/index.html">
+                  </head><body>
+                  Redirecting to the latest AI Surface report&hellip;
+                  <a href="./latest/${REPO_OWNER}/${REPO_NAME}/index.html#demo">Open report</a>
+                  </body></html>
+                  HTML
+                - aws s3 cp /tmp/root-index.html "s3://${REPORT_BUCKET}/index.html" --content-type "text/html"
 
                 # Optional severity gate, applied AFTER the report is published.
                 - |

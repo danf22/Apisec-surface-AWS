@@ -125,14 +125,21 @@ aws cloudformation describe-stacks --stack-name apisec-ai-surface \
   --query "Stacks[0].Outputs" --output table
 ```
 
+- **`ReportWebsiteUrl`** — base website URL. Opening it with no path redirects straight to
+  the latest report (a root `index.html` redirect is published on every run).
 - **`LatestReportUrl`** — stable, bookmarkable URL for the most recent scan (`/latest/index.html`).
-- **`ReportWebsiteUrl`** — base website URL. Every scan is also kept immutably under
-  `reports/<owner>/<name>/<timestamp>/index.html`.
+- Every scan is also kept immutably under `reports/<owner>/<name>/<timestamp>/index.html`.
 
 The report is the interactive attack-surface map (nodes grouped by category, risk badges,
 governance mappings, and an AI-BOM download) — the same view as the local `--ui` server.
 The raw `report.json`, `report.sarif`, and `ai-bom.cyclonedx.json` evidence sit next to it
 for download and automation.
+
+> The `ai-surface` UI shows an empty "scan a repo" form by default and only auto-loads the
+> scan data when the URL carries `?demo`/`#demo` (locally it depends on a live `/api/scan`
+> endpoint that does not exist on a static host). The build injects a small bootstrap into
+> the published `index.html` that sets `#demo` before the app loads, so the hosted URL lands
+> directly on the populated map. If you ever see the blank form, append `?demo` to the URL.
 
 ## Scanning multiple repositories
 
