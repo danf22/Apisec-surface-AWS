@@ -6,21 +6,33 @@ to S3 so the security team can review the findings.
 
 ## How it works
 
-![APIsec AI-Surface scanning pipeline architecture](docs/diagrams/apisec-ai-surface-pipeline.png)
+### AWS architecture
 
-For the **interactive** version (search, route tracing, themes, export):
+Infrastructure view with the AWS services involved — GitHub source through the CodeStar
+connection into CodePipeline, the CodeBuild scan stage, and the S3 buckets.
+
+![APIsec AI-Surface AWS architecture](docs/diagrams/apisec-ai-surface-pipeline-aws.png)
+
+### Logical view
+
+End-to-end logical flow, including secure delivery: the reports bucket is private and
+reachable only via CloudFront (Origin Access Control), with Basic Auth gating viewers.
+
+![APIsec AI-Surface logical flow](docs/diagrams/apisec-ai-surface-pipeline-logical.png)
+
+For the **interactive** version of the logical view (search, route tracing, themes, export):
 
 - **Open it rendered in your browser (no clone needed):**
-  [htmlpreview.github.io view](https://htmlpreview.github.io/?https://github.com/danf22/Apisec-surface-AWS/blob/main/docs/diagrams/apisec-ai-surface-pipeline.html)
-- **Or open the local file** [`docs/diagrams/apisec-ai-surface-pipeline.html`](docs/diagrams/apisec-ai-surface-pipeline.html) directly in a browser.
+  [htmlpreview.github.io view](https://htmlpreview.github.io/?https://github.com/danf22/Apisec-surface-AWS/blob/main/docs/diagrams/apisec-ai-surface-pipeline-logical.html)
+- **Or open the local file** [`docs/diagrams/apisec-ai-surface-pipeline-logical.html`](docs/diagrams/apisec-ai-surface-pipeline-logical.html) directly in a browser.
 
 > Clicking the `.html` file on GitHub shows its source, not the rendered page — GitHub does
 > not execute HTML. Use the htmlpreview link above, or open the file locally. (The preview
 > proxy is a third party and only works after the file is pushed to the default branch.)
 
-<sub>Generated with [Archify](https://github.com/tt-a1i/archify) from the typed source
-[`docs/diagrams/apisec-ai-surface-pipeline.architecture.json`](docs/diagrams/apisec-ai-surface-pipeline.architecture.json).
-Regenerate the HTML: `node archify/bin/archify.mjs deliver architecture docs/diagrams/apisec-ai-surface-pipeline.architecture.json docs/diagrams/apisec-ai-surface-pipeline.html --quality showcase`</sub>
+<sub>Logical view generated with [Archify](https://github.com/tt-a1i/archify) from the typed source
+[`docs/diagrams/apisec-ai-surface-pipeline-logical.architecture.json`](docs/diagrams/apisec-ai-surface-pipeline-logical.architecture.json).
+Regenerate the HTML: `node archify/bin/archify.mjs deliver architecture docs/diagrams/apisec-ai-surface-pipeline-logical.architecture.json docs/diagrams/apisec-ai-surface-pipeline-logical.html --quality showcase`</sub>
 
 ```
 GitHub repo ──(CodeStar connection)──▶ CodePipeline
