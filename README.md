@@ -154,6 +154,7 @@ To reuse an already-authorized connection instead, pass its ARN:
 | `ExistingConnectionArn` | `""` | Reuse an existing connection; blank creates a new one. |
 | `FailOn` | `never` | `never` \| `high` \| `critical` — severity that fails the build. Keep `never` so the report always publishes. |
 | `ReportRetentionDays` | `365` | Retention for timestamped report objects. |
+| `LogRetentionDays` | `90` | Retention (days) for the CodeBuild CloudWatch log group. |
 | `BasicAuthUsername` | `security` | Username required to view reports through CloudFront. |
 | `BasicAuthPassword` | — | Password required to view reports (min 8 chars, `NoEcho`). Required at deploy. |
 | `EnableWaf` | `false` | Attach an AWS WAF web ACL to CloudFront (IP allowlist + rate limit). Requires deploying in `us-east-1`. |
@@ -235,4 +236,20 @@ for many repos — ask and it can be added.)
 - The scanner runs offline: it executes no code from the target repo, makes no network calls,
   and needs no credentials for the target app.
 - Buckets use `DeletionPolicy: Retain`; deleting the stack leaves the buckets (and reports) in place.
+
+### Security hardening
+
+The template applies these controls (addressing common CSPM misconfiguration findings):
+
+- **TLS-only S3 access** — every bucket (artifacts, reports, logs) has a policy that denies
+  requests where `aws:SecureTransport` is `false`.
+- **S3 versioning** — enabled on all buckets, with lifecycle rules expiring noncurrent versions.
+- **CloudFront access logging** — enabled to a dedicated private `-logs` bucket (`cloudfront/` prefix).
+- **CloudWatch Logs retention + CMK** — the CodeBuild log group is created explicitly with a
+  retention period (`LogRetentionDays`) and encrypted with a customer-managed KMS key
+  (rotation enabled), rather than relying on the auto-created, unencrypted, never-expiring group.
+- **CloudFront minimum TLS** — set to `TLSv1.2_2021`. Note: with the default `*.cloudfront.net`
+  certificate, CloudFront negotiates TLS per AWS defaults and does **not** honor a custom
+  minimum protocol version. To fully disable deprecated TLS, attach a custom ACM certificate
+  and domain to the distribution and keep `MinimumProtocolVersion: TLSv1.2_2021`.
 ```

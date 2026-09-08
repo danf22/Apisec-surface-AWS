@@ -56,6 +56,12 @@ Parameters:
     Default: 365
     Description: Days to retain timestamped report objects in the reports bucket.
 
+  LogRetentionDays:
+    Type: Number
+    Default: 90
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+    Description: Retention (days) for the CodeBuild CloudWatch log group.
+
   BasicAuthUsername:
     Type: String
     Default: security
@@ -132,6 +138,8 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -141,6 +149,7 @@ Resources:
           - Id: expire-artifacts
             Status: Enabled
             ExpirationInDays: 30
+            NoncurrentVersionExpirationInDays: 7
 
   # Private bucket. It is NOT a public website and has no bucket-website config;
   # it is reachable only through the CloudFront distribution below via Origin
@@ -159,6 +168,8 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
       BucketEncryption:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
@@ -169,6 +180,9 @@ Resources:
             Status: Enabled
             Prefix: reports/
             ExpirationInDays: !Ref ReportRetentionDays
+          - Id: expire-noncurrent-versions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
 
   # Bucket policy: allow read ONLY from this CloudFront distribution (OAC).
   # The SourceArn condition scopes access to exactly this distribution, so no
@@ -189,6 +203,86 @@ Resources:
             Condition:
               StringEquals:
                 AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ReportDistribution}"
+          # Deny any request not using TLS (fixes "S3 buckets allow plain HTTP").
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt ReportBucket.Arn
+              - !Sub "${ReportBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # Artifact bucket policy: deny non-HTTPS access (fixes "S3 buckets allow
+  # plain HTTP"). The bucket is already private; this enforces TLS in transit.
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # Log bucket for CloudFront access logs (fixes "access logging disabled").
+  # Private, TLS-only, encrypted, with lifecycle expiry. CloudFront log
+  # delivery writes here; ACLs must be permitted for the log-delivery group,
+  # so ownership is set to ObjectWriter rather than BucketOwnerEnforced.
+  LogBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-logs-${AWS::AccountId}-${AWS::Region}"
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-logs
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpirationInDays: 30
+
+  LogBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt LogBucket.Arn
+              - !Sub "${LogBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
 
   # ---------------------------------------------------------------------------
   # CloudFront: the only way to reach the reports bucket
@@ -330,6 +424,19 @@ Resources:
         Comment: !Sub "${ProjectName} AI Surface reports"
         DefaultRootObject: index.html
         PriceClass: PriceClass_100
+        # Access logging (fixes "CloudFront access logging disabled").
+        Logging:
+          Bucket: !GetAtt LogBucket.RegionalDomainName
+          Prefix: cloudfront/
+          IncludeCookies: false
+        # Viewer TLS policy. NOTE: the default *.cloudfront.net certificate
+        # negotiates TLS per AWS defaults and does not honor a custom
+        # MinimumProtocolVersion — deprecated-TLS findings can only be fully
+        # remediated with a custom ACM certificate + domain (see README).
+        # ViewerCertificate is set to reflect intent when a cert is added.
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+          MinimumProtocolVersion: TLSv1.2_2021
         Origins:
           - Id: ReportS3Origin
             DomainName: !GetAtt ReportBucket.RegionalDomainName
@@ -354,6 +461,56 @@ Resources:
             ResponsePagePath: /index.html
 
   # ---------------------------------------------------------------------------
+  # CloudWatch Logs: customer-managed KMS key + explicit log group with retention
+  # (fixes "log groups without retention" and "not encrypted with a CMK").
+  # ---------------------------------------------------------------------------
+  LogsKmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "CMK for ${ProjectName} CodeBuild CloudWatch Logs."
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub "logs.${AWS::Region}.amazonaws.com"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              ArnEquals:
+                kms:EncryptionContext:aws:logs:arn: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}-scan"
+
+  LogsKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${ProjectName}-logs"
+      TargetKeyId: !Ref LogsKmsKey
+
+  ScanLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub "/aws/codebuild/${ProjectName}-scan"
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !GetAtt LogsKmsKey.Arn
+
+  # ---------------------------------------------------------------------------
   # IAM roles
   # ---------------------------------------------------------------------------
   CodeBuildRole:
@@ -375,10 +532,17 @@ Resources:
               - Sid: Logs
                 Effect: Allow
                 Action:
-                  - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/${ProjectName}*"
+                Resource:
+                  - !GetAtt ScanLogGroup.Arn
+                  - !Sub "${ScanLogGroup.Arn}:*"
+              - Sid: LogsKms
+                Effect: Allow
+                Action:
+                  - kms:GenerateDataKey
+                  - kms:Decrypt
+                Resource: !GetAtt LogsKmsKey.Arn
               - Sid: Artifacts
                 Effect: Allow
                 Action:
@@ -453,12 +617,18 @@ Resources:
   # ---------------------------------------------------------------------------
   ScanProject:
     Type: AWS::CodeBuild::Project
+    DependsOn: ScanLogGroup
     Properties:
       Name: !Sub "${ProjectName}-scan"
       Description: Runs apisec-inc/AI-Surface against the source repo and publishes reports to S3.
       ServiceRole: !GetAtt CodeBuildRole.Arn
       Artifacts:
         Type: CODEPIPELINE
+      # Send build logs to the explicit, retention- and CMK-configured group.
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref ScanLogGroup
       Environment:
         Type: LINUX_CONTAINER
         ComputeType: BUILD_GENERAL1_SMALL
