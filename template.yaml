@@ -73,10 +73,20 @@ Parameters:
     Type: String
     NoEcho: true
     MinLength: 8
+    MaxLength: 128
+    # Safe characters only. The password is embedded in the CloudFront Function
+    # JS at deploy time, so characters that break a JS string literal or Fn::Sub
+    # are disallowed: double-quote ("), backslash (\), backtick (`), dollar ($),
+    # and curly braces ({ }). Everything else (letters, digits, spaces, and
+    # punctuation like - _ . ! # % & * + = ? @ ~) is allowed.
+    AllowedPattern: "^[A-Za-z0-9 !#%&()*+,\\-./:;<=>?@\\[\\]^_|~']{8,128}$"
+    ConstraintDescription: >
+      8-128 chars; must NOT contain a double-quote, backslash, backtick, dollar
+      sign, or curly braces. Use letters, digits, and common punctuation.
     Description: >
       Password required to view reports through CloudFront (HTTP Basic Auth).
       Min 8 characters. Stored in the CloudFront Function code at deploy time;
-      rotate by updating the stack with a new value.
+      rotate by updating the stack with a new value. Avoid " \ ` $ { } in the value.
 
   EnableWaf:
     Type: String
@@ -349,6 +359,10 @@ Resources:
           // ---- 1. HTTP Basic Auth ----
           // Use Buffer.from(...).toString("base64") for base64. (String.bytesFrom
           // is deprecated in the current runtime and raises a SyntaxError -> 503.)
+          // NOTE: the password must not contain a double-quote or a backslash
+          // (they break this JS string literal), nor a dollar-sign followed by a
+          // brace (Fn::Sub treats it as a variable). Letters, digits, and most
+          // punctuation are fine.
           var user = "${BasicAuthUsername}";
           var pass = "${BasicAuthPassword}";
           var expected = "Basic " + Buffer.from(user + ":" + pass).toString("base64");
