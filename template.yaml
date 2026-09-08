@@ -104,6 +104,23 @@ Parameters:
       Max requests allowed from a single IP per 5-minute window before WAF
       blocks it (rate-based rule). Only used when EnableWaf=true.
 
+  CustomDomain:
+    Type: String
+    Default: ""
+    Description: >
+      Optional custom domain (CNAME alias) for the CloudFront distribution,
+      e.g. reports.example.com. Requires AcmCertificateArn. When both are set,
+      CloudFront enforces MinimumProtocolVersion TLSv1.2_2021 (closes the
+      deprecated-TLS finding). Leave blank to use the default *.cloudfront.net.
+
+  AcmCertificateArn:
+    Type: String
+    Default: ""
+    Description: >
+      Optional ACM certificate ARN for CustomDomain. The certificate MUST be in
+      us-east-1 (CloudFront requirement) and cover CustomDomain. Required when
+      CustomDomain is set.
+
 Conditions:
   CreateConnection: !Equals [!Ref ExistingConnectionArn, ""]
   WafEnabled: !Equals [!Ref EnableWaf, "true"]
@@ -111,6 +128,10 @@ Conditions:
   HasAllowedCidrs: !And
     - !Condition WafEnabled
     - !Not [!Equals [!Join ["", !Ref AllowedCidrs], ""]]
+  # Use a custom domain + ACM cert only when BOTH are provided.
+  HasCustomDomain: !And
+    - !Not [!Equals [!Ref CustomDomain, ""]]
+    - !Not [!Equals [!Ref AcmCertificateArn, ""]]
 
 Resources:
 
@@ -424,19 +445,29 @@ Resources:
         Comment: !Sub "${ProjectName} AI Surface reports"
         DefaultRootObject: index.html
         PriceClass: PriceClass_100
+        # Custom domain alias, only when a domain + ACM cert are provided.
+        Aliases: !If
+          - HasCustomDomain
+          - [!Ref CustomDomain]
+          - !Ref "AWS::NoValue"
         # Access logging (fixes "CloudFront access logging disabled").
         Logging:
           Bucket: !GetAtt LogBucket.RegionalDomainName
           Prefix: cloudfront/
           IncludeCookies: false
-        # Viewer TLS policy. NOTE: the default *.cloudfront.net certificate
-        # negotiates TLS per AWS defaults and does not honor a custom
-        # MinimumProtocolVersion — deprecated-TLS findings can only be fully
-        # remediated with a custom ACM certificate + domain (see README).
-        # ViewerCertificate is set to reflect intent when a cert is added.
-        ViewerCertificate:
-          CloudFrontDefaultCertificate: true
-          MinimumProtocolVersion: TLSv1.2_2021
+        # Viewer TLS:
+        #  - With a custom ACM cert + domain, CloudFront enforces
+        #    MinimumProtocolVersion TLSv1.2_2021 (closes the deprecated-TLS
+        #    finding).
+        #  - With the default *.cloudfront.net cert, AWS negotiates TLS per its
+        #    own defaults and ignores MinimumProtocolVersion — so the finding
+        #    can only be fully remediated via the custom-domain path.
+        ViewerCertificate: !If
+          - HasCustomDomain
+          - AcmCertificateArn: !Ref AcmCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
         Origins:
           - Id: ReportS3Origin
             DomainName: !GetAtt ReportBucket.RegionalDomainName
@@ -832,6 +863,17 @@ Outputs:
     Condition: WafEnabled
     Description: ARN of the WAF web ACL attached to the distribution.
     Value: !GetAtt ReportWebACL.Arn
+
+  CloudFrontDomainName:
+    Description: >
+      CloudFront domain name. Point your custom domain's DNS CNAME at this
+      value when using CustomDomain.
+    Value: !GetAtt ReportDistribution.DomainName
+
+  CustomDomainUrl:
+    Condition: HasCustomDomain
+    Description: HTTPS URL of the reports on your custom domain.
+    Value: !Sub "https://${CustomDomain}/"
 
   ReportBucketName:
     Description: Reports bucket name (private; reachable only via CloudFront).

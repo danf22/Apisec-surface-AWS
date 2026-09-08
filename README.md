@@ -160,6 +160,8 @@ To reuse an already-authorized connection instead, pass its ARN:
 | `EnableWaf` | `false` | Attach an AWS WAF web ACL to CloudFront (IP allowlist + rate limit). Requires deploying in `us-east-1`. |
 | `AllowedCidrs` | `""` | Comma-separated IPv4 CIDRs allowed to reach reports (e.g. `203.0.113.0/24`). Empty = allow all IPs. Used only when `EnableWaf=true`. |
 | `WafRateLimitPerFiveMin` | `2000` | Requests per IP per 5 min before WAF blocks. Used only when `EnableWaf=true`. |
+| `CustomDomain` | `""` | Optional CNAME alias for CloudFront (e.g. `reports.example.com`). Requires `AcmCertificateArn`. |
+| `AcmCertificateArn` | `""` | ACM certificate ARN for `CustomDomain`. **Must be in `us-east-1`** and cover the domain. |
 
 ## Run a scan
 
@@ -248,8 +250,33 @@ The template applies these controls (addressing common CSPM misconfiguration fin
 - **CloudWatch Logs retention + CMK** — the CodeBuild log group is created explicitly with a
   retention period (`LogRetentionDays`) and encrypted with a customer-managed KMS key
   (rotation enabled), rather than relying on the auto-created, unencrypted, never-expiring group.
-- **CloudFront minimum TLS** — set to `TLSv1.2_2021`. Note: with the default `*.cloudfront.net`
-  certificate, CloudFront negotiates TLS per AWS defaults and does **not** honor a custom
-  minimum protocol version. To fully disable deprecated TLS, attach a custom ACM certificate
-  and domain to the distribution and keep `MinimumProtocolVersion: TLSv1.2_2021`.
+- **CloudFront minimum TLS** — with the default `*.cloudfront.net` certificate, CloudFront
+  negotiates TLS per AWS defaults and does **not** honor a custom minimum protocol version, so
+  a "deprecated TLS" finding cannot be fully closed. To close it, provide `CustomDomain` +
+  `AcmCertificateArn` (below); the distribution then enforces `MinimumProtocolVersion: TLSv1.2_2021`.
+
+### Custom domain + HTTPS certificate (optional)
+
+By default the reports are served on the CloudFront domain (`*.cloudfront.net`). To serve them
+on your own domain over HTTPS with a modern TLS policy (which also closes the deprecated-TLS
+finding), attach an ACM certificate and a domain:
+
+1. **Request an ACM certificate in `us-east-1`** (CloudFront only accepts certs from that
+   region) covering your domain, e.g. `reports.example.com`, and validate it (DNS validation).
+2. **Deploy** with the domain and cert ARN:
+
+   ```bash
+   aws cloudformation deploy --template-file template.yaml \
+     --stack-name apisec-ai-surface --capabilities CAPABILITY_NAMED_IAM \
+     --parameter-overrides \
+         RepoOwner=your-org RepoName=your-repo \
+         BasicAuthPassword='choose-a-strong-password' \
+         CustomDomain=reports.example.com \
+         AcmCertificateArn=arn:aws:acm:us-east-1:ACCOUNT:certificate/xxxx
+   ```
+
+3. **Create a DNS CNAME** for `reports.example.com` pointing at the stack's
+   `CloudFrontDomainName` output.
+
+Leave `CustomDomain`/`AcmCertificateArn` blank to keep the default CloudFront domain.
 ```
